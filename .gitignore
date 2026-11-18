@@ -16,3 +16,16 @@
 *.keystore
 *.p12
 signing.properties
+
+# 测试构建产物（源码 test/ 提交）
+/test/lib-classes/
+/test/build/
+
+# 交付物：APK 与解包审计产物不入库（构建可复现，SHA256 在 audit/*.txt）
+deliverables/*.apk
+deliverables/audit/apk-inspect/
+deliverables/audit/baksmali-check/
+deliverables/audit/aapt2bin/
+deliverables/audit/jar-analysis/
+# 本机 rename 迁移审计（每次 decode 不同）
+audit/

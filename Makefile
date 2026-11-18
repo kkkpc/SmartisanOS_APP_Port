@@ -12,9 +12,9 @@ APK       := Calendar_8.1.2.apk
 CAL_DIR   := apktool/calendar
 JADX_DIR  := decompiled/calendar
 DIST      := dist
-PKG       := com.android.calendar
+PKG       := com.smartisan.calendar
 
-.PHONY: help env install-framework decode decode-jadx build encode sign all install pull-log clean
+.PHONY: help env install-framework decode decode-jadx build encode sign all install pull-log clean llm-clean llm-decode llm-migrate llm-patch llm-build llm-sign llm-all
 
 help:
 	@echo "可用目标："
@@ -22,7 +22,7 @@ help:
 	@echo "  make decode       apktool 反编译 -> apktool/calendar"
 	@echo "  make decode-jadx  jadx 反编译 Java 源码 -> decompiled/calendar"
 	@echo "  make build        编译 src/ 的 Java 并合入 smali（javac->d8->baksmali）"
-	@echo "  make sign         回编译 + zipalign + v2/v3 签名 -> dist/Calendar_debug_signed.apk"
+	@echo "  make sign         回编译 + zipalign + v2/v3 签名 -> dist/Calendar_Smartisan_debug_signed.apk"
 	@echo "  make all          build + sign"
 	@echo "  make install      安装到已连接设备（adb install -r）"
 	@echo "  make pull-log     从设备拉取调试日志到 dist/cal_dbg.log"
@@ -53,17 +53,49 @@ encode:
 	@mkdir -p $(DIST)
 	$(APKTOOL) b $(CAL_DIR) -o $(DIST)/Calendar_patched_unsigned.apk -p $(FW_DIR)
 
-# zipalign + debug 签名（v2/v3）
+# 回编译 + zipalign + debug 签名（v2/v3）
 sign: encode
 	$(SIGNER) --apks $(DIST)/Calendar_patched_unsigned.apk --out $(DIST)/
-	mv $(DIST)/Calendar_patched_unsigned-aligned-debugSigned.apk $(DIST)/Calendar_debug_signed.apk
-	@echo "产物: $(DIST)/Calendar_debug_signed.apk"
+	mv $(DIST)/Calendar_patched_unsigned-aligned-debugSigned.apk $(DIST)/Calendar_Smartisan_debug_signed.apk
+	@echo "产物: $(DIST)/Calendar_Smartisan_debug_signed.apk"
+
+# LLM 测试包：全新 decode -> 包名迁移(smartisan) -> 补丁(方案B可见按钮, 默认不含 bug1) -> 构建 -> 签名
+# 产物独立命名为 dist/Calendar_llm_test.apk，不覆盖基线 Calendar_Smartisan_debug_signed.apk
+LLM_DIST := dist/Calendar_llm_test_unsigned.apk
+
+llm-clean:
+	rm -rf $(CAL_DIR) $(FW_DIR)
+
+llm-decode: llm-clean install-framework
+	$(APKTOOL) d $(APK) -o $(CAL_DIR) -p $(FW_DIR)
+
+llm-migrate: llm-decode
+	python3 scripts/migrate_package.py
+
+llm-patch: llm-migrate
+	python3 patches/apply_patches.py
+
+llm-build: llm-patch
+	./scripts/build.sh
+
+llm-sign: llm-build
+	@mkdir -p $(DIST)
+	$(APKTOOL) b $(CAL_DIR) -o $(LLM_DIST) -p $(FW_DIR)
+	$(SIGNER) --apks $(LLM_DIST) --out $(DIST)/
+	mv $(DIST)/Calendar_llm_test_unsigned-aligned-debugSigned.apk $(DIST)/Calendar_llm_test.apk
+	rm -f $(LLM_DIST) $(DIST)/Calendar_llm_test_unsigned-aligned-debugSigned.apk.idsig
+	@echo "LLM 测试包: $(DIST)/Calendar_llm_test.apk"
+
+.PHONY: llm-clean llm-decode llm-patch llm-build llm-sign
 
 # 完整流程：build -> sign
 all: build sign
 
+# LLM 全链路（干净 decode -> 补丁 -> 构建 -> 签名），独立命名产物
+llm-all: llm-sign
+
 install: sign
-	adb install -r $(DIST)/Calendar_debug_signed.apk
+	adb install -r $(DIST)/Calendar_Smartisan_debug_signed.apk
 
 # 设备 root 下可直接读；非 root 用 run-as
 pull-log:
