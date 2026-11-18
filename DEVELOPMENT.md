@@ -112,6 +112,95 @@ adb logcat -s CalDbg
 
 ## 待办
 
-- [ ] T0.3 OPPO 真机安装与冒烟验证
-- [ ] Bug1 真机回归：切到「第二天」→ 后台 → 回前台，位置应保持
-- [ ] T3 LLM Provider（in-app 菜单入口 + App 内配置界面）
+- [ ] Bug1 真机回归：切到「第二天」→ 后台 → 回前台，位置应保持（需 `--with-bug1` 显式构建）
+
+## 包名迁移（com.android.calendar → com.smartisan.calendar）
+
+流水线顺序（**rename 先行、patch 后行**，2026-11-18 架构裁决）：
+
+```bash
+make llm-all    # decode → migrate → patch → build → sign
+```
+
+`scripts/migrate_package.py`（decode 后、patch 前运行）：
+
+| 步 | 内容 |
+|----|------|
+| A | smali 类树移动 `com/android/calendar` → `com/smartisan/calendar`（1176 文件） |
+| B | 全树 `Lcom/android/calendar/` → `Lcom/smartisan/calendar/`（69006 处，0 残留断言） |
+| C | const-string 定点 20 处（authority/action/偏好文件名/channel，计数校验） |
+| D | res：layout 类名 42 文件、searchable/general_preferences/backup_rules |
+| E | Manifest：package 属性、组件相对名、authorities、custom permission |
+
+**红线（KEEP 断言 22 处 + manifest 5 项）**：系统 CalendarProvider 的
+`content://com.android.calendar/...` URI、纯 authority 字符串、queries 里的系统
+provider 项一律保留——真机日历数据仍从系统 provider 读取。
+
+## LLM 助手（T3 + 收官，2026-11-18 真机验证通过）
+
+入口：**标题栏右侧可见按钮**（方案B：`TitleBar.addRightImageView(0x7f0702f1)`
++ `AssistantEntry` 点击），点击唤出「日程助手」对话框。
+（旧长按方案因真机不可发现已弃用，`AssistantBridge.java` 已删。）
+
+```bash
+make llm-all        # 干净 decode → 包名迁移 → 补丁(默认不含 bug1) → build → sign
+# 产物: dist/Calendar_llm_test.apk（独立命名，不覆盖基线）
+```
+
+真机验证（moto S30, Android 11）：覆盖安装配置保留（Keystore 数据随包走）、
+可见按钮出现、点击弹助手、sensenova provider 连通、月视图回归、0 崩溃。
+
+### Provider 预设（2026-11-18 核对官方文档）
+
+| 服务商 | 端点 | 模型 ID |
+|--------|------|---------|
+| 通义千问 | `https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions` | `qwen-flash` |
+| 智谱 | `https://open.bigmodel.cn/api/paas/v4/chat/completions` | `glm-5.3-flash` |
+| 自定义 | 用户输入完整 HTTPS chat/completions URL | 用户输入 |
+
+- 百炼模型列表页现行 flash 为 qwen3.8-flash，但 `qwen-flash`（2025-07-28 版）文档页仍在、
+  仍是有效模型 ID；兼容模式旧域名 `dashscope.aliyuncs.com` 官方注明仍可用。
+- 智谱 `glm-4-flash` 文档页已 404，现行 Flash 为 `glm-5.3-flash`。
+- 自定义端点强制 https、禁 userInfo/query/fragment、路径含 `/`、ASCII、无 `//`；
+  API key 限 `[!-~]`（可打印 ASCII 无空白），防 HTTP 头注入。
+
+### 安全要点
+
+- key 经 Android Keystore AES-256-GCM 加密存 SharedPreferences；界面遮蔽；不写日志。
+- 日志只记阶段与错误类别（`AssistantLog`，tag `CalAssistant`），无 key/日程/请求响应正文/endpoint。
+- 连接测试只发送固定无隐私文本（`PING_TEXT`）；不跟随重定向；连接 10s / 读取 20s 超时；
+  响应体上限 128KB；回复中 key 出现即替换 `[已隐藏]`。
+- 发送前二次确认（预览对话框「同意并发送」）；发送使用预览时确认的 Provider 实例，
+  之后配置变化不影响本轮；界面销毁（isFinishing/isDestroyed）后忽略过期回调。
+- 仅读取：`CalendarContract.Instances` query（无 insert/update/delete）；摘要与建议只作文本展示。
+
+### 代码结构
+
+| 文件 | 职责 |
+|------|------|
+| `src/com/smartisan/calendar/AssistantEntry.java` | 可见按钮点击监听（OnClickListener → CalendarAssistant.show），宿主唯一接触点 |
+| `src/assistant/CalendarAssistant.java` | 对话框 UI + 流程编排（本机汇总 / 预览确认 / 云端建议） |
+| `src/assistant/CalendarAssistantData.java` | 今日数据（Instances 查询 + 纯计算 build，可 JVM 测试） |
+| `src/assistant/AssistantProfiles.java` | 多配置存储（Keystore 加密）+ 校验 |
+| `src/assistant/AssistantTransport.java` | Provider 接口 / OpenAI 兼容实现 / FakeProvider |
+| `src/assistant/AssistantLog.java` | 阶段日志（只记阶段与错误类别） |
+
+### smali 补丁（patches/apply_patches.py）
+
+| ID | 内容 | 状态 |
+|----|------|------|
+| `stubs` | 9 个日志插桩点（含修复 wide 双寄存器字、onNewIntent 重复 move-result） | 默认应用 |
+| `assistant_entry` | l() 末尾 7 行：iget D → addRightImageView(0x7f0702f1) → new AssistantEntry → setOnClickListener | 默认应用 |
+| `bug1` | 跳回今天短路 | **默认不应用**，`--with-bug1` 显式开启 |
+
+补丁可重复应用（幂等验证通过：干净 decode → 应用 → 再应用 → smali 零 diff）。
+
+### JVM 测试（可控日期样本）
+
+```bash
+cd test && ../Tool/../scripts/… # 见 test/README.md
+```
+
+覆盖：空日历、普通日程、跨天裁剪、全天 UTC 标签、重叠合并与冲突计数、零长度事件、
+乱序输入排序、isToday 时效守卫（日期/时区变化）、FakeProvider 正常与失败两态、
+Provider URL/key 校验、预设端点与模型 ID 断言。全部 PASS。
